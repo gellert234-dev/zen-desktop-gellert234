@@ -621,6 +621,243 @@ func TestExceptionConditions(t *testing.T) {
 	})
 }
 
+func TestContentTypes(t *testing.T) {
+	t.Parallel()
+
+	clickedLinkHeaders := http.Header{
+		"Sec-Fetch-Dest": []string{"document"},
+		"Sec-Fetch-User": []string{"?1"},
+	}
+	negatedRules := []string{`/adserver.$~stylesheet,~xmlhttprequest`}
+
+	tests := []struct {
+		name      string
+		rules     []string
+		url       string
+		headers   http.Header
+		wantBlock bool
+	}{
+		{
+			name:      "document rule blocks clicked link",
+			rules:     []string{`||example.com^$document`},
+			url:       "https://example.com/",
+			headers:   clickedLinkHeaders,
+			wantBlock: true,
+		},
+		{
+			name:    "document rule does not block image",
+			rules:   []string{`||example.com^$document`},
+			url:     "https://example.com/pixel.png",
+			headers: http.Header{"Sec-Fetch-Dest": []string{"image"}},
+		},
+		{
+			name:    "other rule does not block script-driven page load",
+			rules:   []string{`||example.com^$other`},
+			url:     "https://example.com/",
+			headers: http.Header{"Sec-Fetch-Dest": []string{"document"}, "Sec-Fetch-Mode": []string{"navigate"}},
+		},
+		{
+			name:      "hosts entry blocks clicked link",
+			rules:     []string{`0.0.0.0 example.com`},
+			url:       "https://example.com/",
+			headers:   clickedLinkHeaders,
+			wantBlock: true,
+		},
+		{
+			name:      "hosts entry blocks script",
+			rules:     []string{`0.0.0.0 example.com`},
+			url:       "https://example.com/script.js",
+			headers:   http.Header{"Sec-Fetch-Dest": []string{"script"}},
+			wantBlock: true,
+		},
+		{
+			name:      "hosts entry blocks request without fetch metadata",
+			rules:     []string{`0.0.0.0 example.com`},
+			url:       "https://example.com/",
+			wantBlock: true,
+		},
+		{
+			name:      "document exception does not cancel hosts entry on script",
+			rules:     []string{`0.0.0.0 example.com`, `@@||example.com^$document`},
+			url:       "https://example.com/script.js",
+			headers:   http.Header{"Sec-Fetch-Dest": []string{"script"}},
+			wantBlock: true,
+		},
+		{
+			name:      "negated types block other types",
+			rules:     negatedRules,
+			url:       "https://example.com/adserver.js",
+			headers:   http.Header{"Sec-Fetch-Dest": []string{"script"}},
+			wantBlock: true,
+		},
+		{
+			name:    "negated types do not block the first negated type",
+			rules:   negatedRules,
+			url:     "https://example.com/adserver.css",
+			headers: http.Header{"Sec-Fetch-Dest": []string{"style"}},
+		},
+		{
+			name:    "negated types do not block the second negated type",
+			rules:   negatedRules,
+			url:     "https://example.com/adserver.json",
+			headers: http.Header{"Sec-Fetch-Dest": []string{"empty"}},
+		},
+		{
+			name:  "negated type does not block a request without fetch metadata",
+			rules: []string{`||example.com^$~image`},
+			url:   "https://example.com/",
+		},
+		{
+			name:  "negated ping does not block a request without fetch metadata",
+			rules: []string{`||example.com^$~ping`},
+			url:   "https://example.com/",
+		},
+		{
+			name:  "negated websocket does not block a request without fetch metadata",
+			rules: []string{`||example.com^$~websocket`},
+			url:   "https://example.com/",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			nr := New()
+			for _, r := range tt.rules {
+				if _, err := nr.ParseRule(r, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			_, shouldBlock, _ := nr.ModifyReq(newTestRequest(t, tt.url, tt.headers))
+			if shouldBlock != tt.wantBlock {
+				t.Errorf("shouldBlock = %t, want %t", shouldBlock, tt.wantBlock)
+			}
+		})
+	}
+}
+
+func TestUserActivatedNavigation(t *testing.T) {
+	t.Parallel()
+
+	clickedLinkHeaders := http.Header{
+		"Sec-Fetch-Dest": []string{"document"},
+		"Sec-Fetch-Mode": []string{"navigate"},
+		"Sec-Fetch-User": []string{"?1"},
+	}
+	scriptNavigationHeaders := http.Header{
+		"Sec-Fetch-Dest": []string{"document"},
+		"Sec-Fetch-Mode": []string{"navigate"},
+	}
+	documentExceptionRules := []string{`||example.com^`, `@@||example.com^$document`}
+
+	tests := []struct {
+		name         string
+		rules        []string
+		url          string
+		headers      http.Header
+		wantBlock    bool
+		wantRedirect string
+	}{
+		{
+			name:         "untyped removeparam applies to clicked link",
+			rules:        []string{`||example.com^$removeparam=utm_source`},
+			url:          "https://example.com/?utm_source=news&id=1",
+			headers:      clickedLinkHeaders,
+			wantRedirect: "https://example.com/?id=1",
+		},
+		{
+			name:    "untyped block rule does not block clicked link",
+			rules:   []string{`||example.com^`},
+			url:     "https://example.com/",
+			headers: clickedLinkHeaders,
+		},
+		{
+			name:      "untyped block rule blocks script-driven page load",
+			rules:     []string{`||example.com^`},
+			url:       "https://example.com/",
+			headers:   scriptNavigationHeaders,
+			wantBlock: true,
+		},
+		{
+			name:      "later document rule blocks clicked link after skipped untyped rule",
+			rules:     []string{`||example.com^`, `||example.com/page$document`},
+			url:       "https://example.com/page",
+			headers:   clickedLinkHeaders,
+			wantBlock: true,
+		},
+		{
+			name:    "document exception cancels untyped block rule on script-driven page load",
+			rules:   documentExceptionRules,
+			url:     "https://example.com/",
+			headers: scriptNavigationHeaders,
+		},
+		{
+			name:      "document exception does not cancel untyped block rule on script",
+			rules:     documentExceptionRules,
+			url:       "https://example.com/script.js",
+			headers:   http.Header{"Sec-Fetch-Dest": []string{"script"}},
+			wantBlock: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			nr := New()
+			for _, r := range tt.rules {
+				if _, err := nr.ParseRule(r, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			_, shouldBlock, redirectURL := nr.ModifyReq(newTestRequest(t, tt.url, tt.headers))
+			if shouldBlock != tt.wantBlock {
+				t.Errorf("shouldBlock = %t, want %t", shouldBlock, tt.wantBlock)
+			}
+			if redirectURL != tt.wantRedirect {
+				t.Errorf("redirect URL = %q, want %q", redirectURL, tt.wantRedirect)
+			}
+		})
+	}
+}
+
+func TestDocumentResponse(t *testing.T) {
+	t.Parallel()
+
+	nr := New()
+	if _, err := nr.ParseRule(`||example.com^$document,removeheader=refresh`, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tt := range []struct {
+		name        string
+		dest        string
+		wantRefresh string
+	}{
+		{"removes header from page load", "document", ""},
+		{"keeps header on script", "script", "5"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			res := &http.Response{Header: http.Header{
+				"Content-Type": []string{"text/html"},
+				"Refresh":      []string{"5"},
+			}}
+			req := newTestRequest(t, "https://example.com/", http.Header{"Sec-Fetch-Dest": []string{tt.dest}})
+			if _, err := nr.ModifyRes(req, res); err != nil {
+				t.Fatal(err)
+			}
+			if got := res.Header.Get("Refresh"); got != tt.wantRefresh {
+				t.Errorf("Refresh = %q, want %q", got, tt.wantRefresh)
+			}
+		})
+	}
+}
+
 func TestSharedModifiers(t *testing.T) {
 	t.Parallel()
 

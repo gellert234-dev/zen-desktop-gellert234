@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/url"
 
+	"github.com/irbis-sh/zen-desktop/internal/fetchmeta"
+	"github.com/irbis-sh/zen-desktop/internal/networkrules/contenttype"
 	"github.com/irbis-sh/zen-desktop/internal/networkrules/exceptionrule"
 	"github.com/irbis-sh/zen-desktop/internal/networkrules/rule"
 )
@@ -26,10 +28,11 @@ func New() *NetworkRules {
 
 func (nr *NetworkRules) ModifyReq(req *http.Request) (appliedRules []rule.Rule, shouldBlock bool, redirectURL string) {
 	reqURL := renderURLWithoutPort(req.URL)
+	reqType := contenttype.FromRequest(req)
 
 	primaryRules := nr.primaryStore.Get(reqURL)
 	primaryRules = filter(primaryRules, func(r *rule.Rule) bool {
-		return r.ShouldMatchReq(req)
+		return r.ShouldMatchReq(req, reqType)
 	})
 	if len(primaryRules) == 0 {
 		return nil, false, ""
@@ -37,9 +40,10 @@ func (nr *NetworkRules) ModifyReq(req *http.Request) (appliedRules []rule.Rule, 
 
 	exceptions := nr.exceptionStore.Get(reqURL)
 	exceptions = filter(exceptions, func(er *exceptionrule.ExceptionRule) bool {
-		return er.ShouldMatchReq(req)
+		return er.ShouldMatchReq(req, reqType)
 	})
 
+	clickedLink := fetchmeta.IsUserActivatedNavigation(req)
 	initialURL := req.URL.String()
 
 	var query url.Values
@@ -55,7 +59,12 @@ outer:
 				continue outer
 			}
 		}
-		if r.ShouldBlockReq(req) {
+		if r.IsBlockRule() {
+			// As in AdGuard, a block rule doesn't stop a page the user asked for unless it
+			// opts in with $document or $all. Rules that modify the request still apply.
+			if clickedLink && !r.BlocksNavigations() {
+				continue
+			}
 			return []rule.Rule{*r}, true, ""
 		}
 
@@ -88,10 +97,11 @@ outer:
 
 func (nr *NetworkRules) ModifyRes(req *http.Request, res *http.Response) ([]rule.Rule, error) {
 	url := renderURLWithoutPort(req.URL)
+	resType := contenttype.FromResponse(req, res)
 
 	primaryRules := nr.primaryStore.Get(url)
 	primaryRules = filter(primaryRules, func(r *rule.Rule) bool {
-		return r.ShouldMatchRes(res)
+		return r.ShouldMatchRes(res, resType)
 	})
 	if len(primaryRules) == 0 {
 		return nil, nil
@@ -99,7 +109,7 @@ func (nr *NetworkRules) ModifyRes(req *http.Request, res *http.Response) ([]rule
 
 	exceptions := nr.exceptionStore.Get(url)
 	exceptions = filter(exceptions, func(er *exceptionrule.ExceptionRule) bool {
-		return er.ShouldMatchRes(res)
+		return er.ShouldMatchRes(res, resType)
 	})
 
 	var appliedRules []rule.Rule
